@@ -1,0 +1,52 @@
+{
+  "mass_lb": 0.2303115,
+  "com_radius_in": 5.0,
+  "com_inertia_lb_in2": 1.953149,
+  "start_deg": 0.0,
+  "target_deg": 90.0,
+  "com_offset_deg": 0.0,
+  "motor_count": 1,
+  "motor": {
+    "name": "Kraken X44 — provisional WCP trapezoidal model",
+    "nominal_voltage": 12.0,
+    "free_rpm": 7530.0,
+    "free_current_a": 1.4,
+    "stall_torque_nm": 4.05,
+    "stall_current_a": 275.0,
+    "rotor_inertia_kg_m2": 0.0
+  },
+  "stator_limit_a": 279.0,
+  "supply_limit_a_per_motor": 40.0,
+  "regen_limit_a_per_motor": 40.0,
+  "battery_v": 12.0,
+  "battery_resistance_ohm": 0.012,
+  "wiring_resistance_ohm": 0.0,
+  "other_supply_current_a": 0.0,
+  "output_viscous_friction_nm_per_rad_s": 0.0,
+  "extra_output_inertia_kg_m2": 0.0,
+  "ratios": [1, 2, 3, 4, 5, 7, 10, 15, 20, 30, 40, 60, 80, 100],
+  "duration_min_s": 0.02,
+  "duration_max_s": 4.0,
+  "duration_scan_factor": 1.06,
+  "electrical_headroom_fraction": 0.95,
+  "sample_dt_s": 0.0002,
+  "position_tolerance_deg": 0.5,
+  "velocity_tolerance_deg_s": 2.0,
+  "settle_dwell_s": 0.1,
+  "hold_s": 0.3,
+  "controller_bandwidth_rad_s": 40.0,
+  "notes": [
+    "User COM inertia assumed to be about an axis parallel to the pivot; lb interpreted as pound-mass.",
+    "WCP motor table is preliminary; not a verified current FOC model.",
+    "Rotor inertia is UNKNOWN; zero is an optimistic baseline, not a measured value.",
+    "Ideal transmission; unmeasured output friction and wiring resistance set to zero.",
+    "12 milliohm battery estimate originates from a 1 kHz impedance specification, not measured DC sag.",
+    "Ideal reversible battery accepts regeneration; 40 A regen cap is an assumed simulation bound, not a battery charge rating.",
+    "Ratios are mathematical candidates, not validated COTS combinations. No structural acceleration limit is provided."
+  ],
+  "sources": [
+    "https://docs.wcproducts.com/welcome/electronics/kraken-x44/kraken-x44-motor/overview-and-features/motor-performance",
+    "https://www.revrobotics.com/content/docs/ES17-12_User_Guide.pdf",
+    "https://andymark.com/products/mk-es17-12-12v-sla-battery-set-of-2"
+  ]
+}
