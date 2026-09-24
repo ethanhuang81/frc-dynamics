@@ -16,11 +16,43 @@ Alternative inputs/output: `python3 calculator.py --config arm.json --output res
 Each run overwrites matching output files. Old trace files for removed candidates
 may remain; `summary.json` and the report identify the current run's candidates.
 
+## Continuous ratio optimization
+
+The calculator now searches decimal ratios instead of limiting the answer to
+the `ratios` comparison list. In `arm.json`:
+
+```json
+"optimization": {
+  "enabled": true,
+  "ratio_min": 1.0,
+  "ratio_max": 100.0,
+  "ratio_tolerance": 0.01,
+  "coarse_samples": 21
+}
+```
+
+It starts with a logarithmic scan, then repeatedly refines detected local valleys
+to the ratio tolerance. At each ratio, it brackets a feasible profile duration and
+refines that transition to 10 microseconds. The objective is forward-simulated
+completion time including settling, with profile duration breaking ties.
+Controller sampling quantizes completion time; two decimal places specify a
+search/display precision, not real-world accuracy. This is not a joint global
+optimization of gearing, trajectory and controller tuning. In particular, a
+slower reference profile might settle sooner; that tradeoff is not searched here.
+
+`optimization.csv` records evaluations; `optimized_trace.csv` is the selected
+decimal ratio's trace. The report and `summary.json` show the best ratio found.
+Bounds are inclusive; a boundary winner means the optimum may lie outside the
+searched range. Narrow minima or feasible islands can be missed. Increase
+`coarse_samples` to check search sensitivity. Disable optimization to run only
+the explicit comparison list. Existing configurations without the new block
+continue to run the comparison list only.
+
 ## What it computes
 
 - Converts pound-mass/inches to SI and shifts COM inertia to the pivot.
-- Generates quintic rest-to-rest profiles, searching duration on a geometric
-  grid for every candidate reduction. Checks voltage and current feasibility.
+- Generates quintic rest-to-rest profiles, bracketing duration on a geometric
+  grid and then refining feasibility. Checks voltage and current feasibility.
 - Forward integrates angle and velocity with RK4 under sampled computed-torque
   PD tracking and an ideal instantaneous motor current controller.
 - Solves motor voltage, PWM supply current, and battery sag consistently.

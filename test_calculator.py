@@ -3,7 +3,7 @@ import json
 import math
 from pathlib import Path
 import unittest
-from calculator import Model, profile, simulate, feasible_profile, LB, INCH
+from calculator import Model, profile, simulate, feasible_profile, choose_duration, continuous_search, LB, INCH
 from physics import fixed_duty_point
 
 
@@ -82,6 +82,27 @@ class CalculatorTests(unittest.TestCase):
             cfg = copy.deepcopy(self.cfg)
             cfg[key] = value
             with self.assertRaises(ValueError): Model(cfg)
+
+    def test_decimal_optimum_search(self):
+        best, _ = continuous_search(lambda g: ((g-3.62)**2,0),1,10,0.001)
+        self.assertAlmostEqual(best,3.62,places=3)
+
+    def test_search_boundaries_and_infeasible(self):
+        best,_ = continuous_search(lambda g: (g,0),1,10)
+        self.assertEqual(best,1)
+        best,_ = continuous_search(lambda g: (-g,0),1,10)
+        self.assertEqual(best,10)
+        best,_ = continuous_search(lambda g: (math.inf,math.inf),1,10)
+        self.assertIsNone(best)
+
+    def test_search_multiple_valleys(self):
+        best,_ = continuous_search(lambda g: (min((g-2)**2+1,(g-7.31)**2),0),1,10,0.001,31)
+        self.assertAlmostEqual(best,7.31,places=3)
+
+    def test_refined_duration(self):
+        duration = choose_duration(self.m,3.62)
+        self.assertTrue(feasible_profile(self.m,3.62,duration))
+        self.assertFalse(feasible_profile(self.m,3.62,duration-0.00002))
 
 
 if __name__=='__main__': unittest.main()

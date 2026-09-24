@@ -58,6 +58,12 @@ class Model:
             raise ValueError('motor_count must be a positive integer')
         if not c['ratios'] or any(g <= 0 for g in c['ratios']):
             raise ValueError('Ratios must be positive')
+        opt = c.get('optimization', {})
+        if opt.get('enabled', False):
+            if not 0 < opt['ratio_min'] < opt['ratio_max'] or opt['ratio_tolerance'] <= 0:
+                raise ValueError('Invalid continuous ratio bounds/tolerance')
+            if type(opt['coarse_samples']) is not int or opt['coarse_samples'] < 3:
+                raise ValueError('coarse_samples must be an integer >= 3')
         if not 0 < c['electrical_headroom_fraction'] <= 1:
             raise ValueError('Headroom must be in (0,1]')
         if c['duration_scan_factor'] <= 1 or c['duration_max_s'] < c['duration_min_s']:
@@ -156,13 +162,57 @@ def feasible_profile(model, ratio, duration, samples=600):
 
 
 def choose_duration(model, ratio):
-    """First feasible duration on a geometric grid; no global-optimum claim."""
+    """Bracket first feasible duration, then refine it to 10 microseconds.
+
+    Local bisection assumes a feasible transition inside the detected bracket.
+    Narrow feasible islands can be missed; this is not global optimal control.
+    """
     duration = model.c['duration_min_s']
+    previous = duration
     maximum = model.c['duration_max_s']
     while True:
-        if feasible_profile(model, ratio, duration): return duration
+        if feasible_profile(model, ratio, duration):
+            lo, hi = previous, duration
+            while hi-lo > 0.00001:
+                mid = (lo+hi)/2
+                if feasible_profile(model, ratio, mid): hi = mid
+                else: lo = mid
+            return hi
         if duration >= maximum: return None
+        previous = duration
         duration = min(maximum, duration*model.c['duration_scan_factor'])
+
+
+def continuous_search(objective, lower, upper, tolerance=0.01, coarse_samples=21):
+    """Coarse log scan followed by adaptive refinement of detected valleys.
+
+    objective returns (completion_time, profile_time); infinities mean infeasible.
+    Endpoint candidates are included. No unimodality/global-optimality guarantee.
+    """
+    if not 0 < lower < upper or tolerance <= 0 or coarse_samples < 3:
+        raise ValueError('Invalid search bounds')
+    values = {}
+    def evaluate(g):
+        if g not in values: values[g] = objective(g)
+        return values[g]
+    grid = [math.exp(math.log(lower)+(math.log(upper)-math.log(lower))*i/(coarse_samples-1))
+            for i in range(coarse_samples)]
+    grid[0], grid[-1] = lower, upper
+    for g in grid: evaluate(g)
+    intervals = []
+    for i,g in enumerate(grid):
+        left, right = max(0,i-1), min(len(grid)-1,i+1)
+        if math.isfinite(values[g][0]) and values[g] <= values[grid[left]] and values[g] <= values[grid[right]]:
+            intervals.append((grid[left],grid[right]))
+    for lo,hi in intervals:
+        while hi-lo > tolerance:
+            points = [lo+(hi-lo)*i/6 for i in range(7)]
+            for g in points: evaluate(g)
+            winner = min(range(7),key=lambda i:values[points[i]])
+            lo,hi = points[max(0,winner-1)],points[min(6,winner+1)]
+    feasible = [g for g in values if math.isfinite(values[g][0])]
+    best = min(feasible,key=lambda g:values[g]) if feasible else None
+    return best, values
 
 
 def simulate(model, ratio, duration, dt=None):
@@ -241,14 +291,14 @@ def save_csv(path, rows):
         writer.writerows(rows)
 
 
-def chart(rows, keys, title, unit):
+def chart(rows, keys, title, unit, x_key='time_s', x_unit='s'):
     colors = ['#38bdf8','#fb923c','#a78bfa']
     values = [row[k] for row in rows for k in keys]
     lo, hi = min(0,min(values)), max(values)
     if hi-lo < 1e-9: hi = lo+1
     width, height = 720, 225
     x0, y0, pw, ph = 65, 25, 630, 155
-    xmax = max(row['time_s'] for row in rows) or 1
+    xmax = max(row[x_key] for row in rows) or 1
     parts = [f'<h3>{html.escape(title)}</h3><svg viewBox="0 0 {width} {height}" role="img" aria-label="{html.escape(title)}">']
     for f in (0,0.5,1):
         y = y0+ph*(1-f)
@@ -257,14 +307,14 @@ def chart(rows, keys, title, unit):
     sampled = rows[::stride]
     if sampled[-1] is not rows[-1]: sampled = sampled+[rows[-1]]
     for key, color in zip(keys,colors):
-        points = ' '.join(f'{x0+r["time_s"]/xmax*pw:.2f},{y0+ph*(hi-r[key])/(hi-lo):.2f}' for r in sampled)
+        points = ' '.join(f'{x0+r[x_key]/xmax*pw:.2f},{y0+ph*(hi-r[key])/(hi-lo):.2f}' for r in sampled)
         parts.append(f'<polyline points="{points}" fill="none" stroke="{color}" stroke-width="1.6"/>')
-    parts.append(f'<text x="65" y="205">0 s</text><text x="635" y="205">{xmax:.3f} s</text></svg>')
+    parts.append(f'<text x="65" y="205">0 {x_unit}</text><text x="635" y="205">{xmax:.3f} {x_unit}</text></svg>')
     parts.append('<p>'+html.escape(unit)+' · '+' / '.join(f'<span style="color:{color}">{html.escape(key)}</span>' for key,color in zip(keys,colors))+'</p>')
     return ''.join(parts)
 
 
-def report(model, summaries, best, trace, convergence, path):
+def report(model, summaries, best, trace, convergence, path, optimization=None, curve=None):
     headings = ['Ratio','Profile (s)','Completion (s)','Stator peak (A)','Supply peak (A)','Bus min (V)','Status']
     table = '<table><tr>'+''.join('<th>'+x+'</th>' for x in headings)+'</tr>'
     for s in summaries:
@@ -272,6 +322,8 @@ def report(model, summaries, best, trace, convergence, path):
         table += '<tr>'+''.join('<td>'+ (f'{x:.4g}' if isinstance(x,(int,float)) else html.escape(str(x or '—')))+'</td>' for x in vals)+'</tr>'
     table += '</table>'
     plots = ''
+    ratio_plot = chart(curve,['completion_s'],'Completion time versus reduction','seconds; x-axis = motor/output reduction',
+                       x_key='ratio',x_unit=':1') if curve else ''
     if best:
         for keys,title,unit in [(['angle_deg','reference_deg'],'Angle and reference','degrees'),
                                 (['velocity_deg_s'],'Output velocity','degrees/s'),
@@ -285,8 +337,12 @@ def report(model, summaries, best, trace, convergence, path):
 <div class="notice"><b>Provisional predictions, not a hardware-validated gear recommendation.</b><ul>
 {''.join('<li>'+html.escape(x)+'</li>' for x in model.c['notes'])}</ul></div>
 <h2>Your arm</h2><p>Mass: {model.mass:.8f} kg · COM radius: {model.radius:.6f} m · COM inertia: {model.j_com:.9f} kg m² · Pivot inertia: {model.j_arm:.9f} kg m².<br>Horizontal gravity torque: {model.gravity_load(model.start):.6f} N m.</p>
-<h2>Reduction sweep</h2><p>Each ratio uses the first electrically feasible quintic profile on a {model.c['duration_scan_factor']:.3f}× duration grid, with {100*(1-model.c['electrical_headroom_fraction']):.1f}% electrical headroom. Forward simulation checks tracking and terminal settling. Completion includes {model.c['settle_dwell_s']:.3f} s dwell. This is a profile-family comparison, not global time optimization.</p>
-{table}<h2>Selected trace</h2><p>{html.escape('Best completed sampled candidate: '+str(best['ratio'])+':1' if best else 'No completed candidate found.')}</p>{plots}
+<h2>Continuous ratio optimization</h2><p>{html.escape('Best ratio found: '+format(best['ratio'],'.2f')+':1' if best else 'No completed candidate found.')}</p>
+<p>Objective: minimum simulated completion time including settling, using the first feasible refined quintic profile at each ratio. Profile duration breaks completion-time ties. This is a numerical search within the model and bounds, not a proof of global optimality or two-decimal hardware accuracy.</p>
+<pre>{html.escape(json.dumps(optimization or {'enabled':False},indent=2))}</pre>
+{ratio_plot}
+<h2>Comparison ratios</h2><p>Duration search brackets feasibility then refines to 10 microseconds, with {100*(1-model.c['electrical_headroom_fraction']):.1f}% electrical headroom. Forward simulation checks tracking and terminal settling. Completion includes {model.c['settle_dwell_s']:.3f} s dwell. Optimization evaluations are saved separately in optimization.csv.</p>
+{table}<h2>Selected trace</h2><p>{html.escape('Selected ratio: '+format(best['ratio'],'.4f')+':1' if best else 'No completed candidate found.')}</p>{plots}
 <h2>Numerical check</h2><pre>{html.escape(json.dumps(convergence,indent=2))}</pre>
 <p>CSV traces and summary.json are saved alongside this report. All input parameters are in arm.json; rerun Python after editing.</p>
 <h2>Sources</h2><ul>{''.join('<li><a href="'+html.escape(url,quote=True)+'">'+html.escape(url)+'</a></li>' for url in model.c['sources'])}</ul>'''
@@ -316,7 +372,40 @@ def main():
         except ValueError as exc:
             summaries.append(dict(ratio=ratio,status=str(exc)))
     good = [s for s in summaries if s['status']=='completed']
-    best = min(good,key=lambda s:s['completion_s']) if good else None
+    best = min(good,key=lambda s:(s['completion_s'],s['profile_s'])) if good else None
+    opt = cfg.get('optimization', {})
+    optimization = dict(enabled=opt.get('enabled',False))
+    curve = []
+    if optimization['enabled']:
+        print('Refining continuous ratio search...',flush=True)
+        cache = {s['ratio']:s for s in summaries}
+        def objective(ratio):
+            if ratio not in cache:
+                duration = choose_duration(model,ratio)
+                if duration is None:
+                    cache[ratio] = dict(ratio=ratio,status='no_feasible_profile')
+                else:
+                    try:
+                        _, cache[ratio] = simulate(model,ratio,duration)
+                    except ValueError as exc:
+                        cache[ratio] = dict(ratio=ratio,status=str(exc))
+            s = cache[ratio]
+            return (s['completion_s'],s['profile_s']) if s['status']=='completed' else (math.inf,math.inf)
+        selected, evaluated = continuous_search(objective,opt['ratio_min'],opt['ratio_max'],
+            opt['ratio_tolerance'],opt['coarse_samples'])
+        # Include explicit comparison ratios within the requested bounds too.
+        pool = [s for g,s in cache.items() if opt['ratio_min'] <= g <= opt['ratio_max'] and s['status']=='completed']
+        best = min(pool,key=lambda s:(s['completion_s'],s['profile_s'])) if pool else None
+        optimization.update(bounds=[opt['ratio_min'],opt['ratio_max']],ratio_tolerance=opt['ratio_tolerance'],
+            evaluations=len(evaluated),best_ratio=best['ratio'] if best else None,
+            at_boundary=bool(best and min(abs(best['ratio']-opt['ratio_min']),abs(best['ratio']-opt['ratio_max'])) <= opt['ratio_tolerance']),
+            note='Refines detected valleys. Narrow minima can be missed; controller sampling quantizes completion time.')
+        save_csv(args.output/'optimization.csv',[dict(ratio=g,completion_s=None if not math.isfinite(v[0]) else v[0],
+            profile_s=None if not math.isfinite(v[1]) else v[1],status=cache[g]['status']) for g,v in sorted(evaluated.items())])
+        curve = [dict(ratio=g,completion_s=v[0]) for g,v in sorted(evaluated.items()) if math.isfinite(v[0])]
+        if best:
+            traces[best['ratio']], best = simulate(model,best['ratio'],best['profile_s'])
+            save_csv(args.output/'optimized_trace.csv',traces[best['ratio']])
     convergence = {}
     if best:
         fine_trace, fine = simulate(model,best['ratio'],best['profile_s'],cfg['sample_dt_s']/2)
@@ -333,10 +422,10 @@ def main():
             and convergence['profile_6000_samples_feasible'])
         save_csv(args.output/'best_trace_half_dt.csv',fine_trace)
     output = dict(inputs=cfg,mass_kg=model.mass,pivot_inertia_kg_m2=model.j_arm,
-                  candidates=summaries,best=best,convergence=convergence)
+                  candidates=summaries,best=best,optimization=optimization,convergence=convergence)
     (args.output/'summary.json').write_text(json.dumps(output,indent=2,allow_nan=False))
-    report(model,summaries,best,traces[best['ratio']] if best else [],convergence,args.output/'report.html')
-    print(json.dumps(dict(best=best,convergence=convergence),indent=2))
+    report(model,summaries,best,traces[best['ratio']] if best else [],convergence,args.output/'report.html',optimization,curve)
+    print(json.dumps(dict(best=best,optimization=optimization,convergence=convergence),indent=2))
 
 
 if __name__=='__main__': main()
